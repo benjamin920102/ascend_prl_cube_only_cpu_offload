@@ -19,16 +19,9 @@
 #define R PRL_RANK
 
 extern int pearl_init(int dev, int nbands);
-extern void pearl_finalize(void);
-extern void pearl_set_b(const int8_t *b, int n);
-extern void pearl_set_b_slot(const int8_t *b, int n, int slot) __attribute__((weak));
-extern void pearl_use_b(int slot) __attribute__((weak));
-extern void pearl_set_bt_slot(const int8_t *bt, int slot) __attribute__((weak));
-extern int prep_random_reuse(uint64_t seed, int8_t *A, int8_t *B, const uint8_t *key,
-                       int64_t m, int64_t n, int64_t k,
-                       int8_t *An, int8_t *Btn, int8_t *EAL, int8_t *EBR,
-                       uint8_t *rA, uint8_t *rB, uint8_t *cA, uint8_t *cB, int nt, int cert_version);
-extern int prep_random_bt_reuse(uint64_t seed, int8_t *A, int8_t *B, const uint8_t *key,
+extern void pearl_use_b(int slot);
+extern void pearl_set_b_nz_slot(const int8_t *b_nz, int slot);
+extern int prep_random_nz_reuse(uint64_t seed, int8_t *A, int8_t *B, const uint8_t *key,
                           int64_t m, int64_t n, int64_t k,
                           int8_t *An, int8_t *bt_packed, int8_t *EAL, int8_t *EBR,
                           uint8_t *rA, uint8_t *rB, uint8_t *cA, uint8_t *cB, int nt, int cert_version);
@@ -39,7 +32,7 @@ extern int prep_a_side_reuse(uint64_t seed, int8_t *A, const uint8_t *key, const
                        int64_t m, int64_t k,
                        int8_t *An, int8_t *EAL, uint8_t *rootA, uint8_t *commitA, int nt, int cert_version);
 extern int scan_full(const int8_t *an, int nstrips, const uint8_t *key, const uint32_t *tgt,
-                     int nbands, int n_hi, int pow_threads,
+                     int nbands, int n_hi, int pow_threads, uint32_t *scratch,
                      int *hs, int *ht);
 extern ssize_t build_proof_bin_cached_b(const uint8_t *a, const uint8_t *b, size_t m, size_t n,
                                size_t k, const uint8_t *key,
@@ -162,8 +155,7 @@ static int ensure_bside(long N, long Kc, int prep_n) {
     prl_cpu_enter();
     prep_check(prep_b_side_reuse(seed, bs.B, bs.key, N, Kc, bs.bt, bs.EBR, bs.rootB, bs.commitB, prep_n, cert_version));
     prl_cpu_leave();
-    if (pearl_set_bt_slot)     pearl_set_bt_slot(bs.bt, 0);
-    else if (pearl_set_b_slot) pearl_set_b_slot(bs.bt, (int)N, 0);
+    pearl_set_b_nz_slot(bs.bt, 0);
     bs.slot = 0; bs.valid = 1; bs.since = 0;
     return 1;
 }
@@ -200,20 +192,13 @@ static void *prep_worker(void *p) {
     clock_gettime(CLOCK_MONOTONIC, &pa);
     uint64_t seed = ((uint64_t)rand() << 32) ^ (uint64_t)time(0);
     int prep_n = prl_cpu_prep_threads();
-    if (pearl_set_bt_slot) {
-        prep_check(prep_random_bt_reuse(seed, b->A, b->B, b->key, mp.m, mp.n, mp.k, 
-                       b->An, b->Btn, b->EAL, b->EBR,
-                       b->roots[0], b->roots[1], b->roots[2], b->roots[3], prep_n, b->cert_version));
-    } else {
-        prep_check(prep_random_reuse(seed, b->A, b->B, b->key, mp.m, mp.n, mp.k, 
-                    b->An, b->Btn, b->EAL, b->EBR,
-                    b->roots[0], b->roots[1], b->roots[2], b->roots[3], prep_n, b->cert_version));
-    }
+    prep_check(prep_random_nz_reuse(seed, b->A, b->B, b->key, mp.m, mp.n, mp.k,
+                   b->An, b->Btn, b->EAL, b->EBR,
+                   b->roots[0], b->roots[1], b->roots[2], b->roots[3], prep_n, b->cert_version));
     clock_gettime(CLOCK_MONOTONIC, &pb);
     g_last_prep_ms = (pb.tv_sec - pa.tv_sec) * 1000 + (pb.tv_nsec - pa.tv_nsec) / 1000000;
     prl_cpu_leave();
-    if (pearl_set_bt_slot)     pearl_set_bt_slot(b->Btn, b->slot);
-    else if (pearl_set_b_slot) pearl_set_b_slot(b->Btn, (int)mp.n, b->slot);
+    pearl_set_b_nz_slot(b->Btn, b->slot);
     return 0;
 }
 
@@ -263,7 +248,7 @@ static void process_proof(bundle_t *cur, uint8_t *bin, uint8_t *payload_buf) {
     long M = mp.m, N = mp.n, Kc = mp.k;
     int nbands = (int)(N / 64), ht_per_block = 64 / (int)mp.nrows;
     size_t rows_abs[64], cols_abs[64];
-    // Decode the scan's tile index into the logical row/column origin.
+    // Decode the vector kernel's tile index into the logical row/column origin.
     int hi = cur->hit_tile / nbands, wi = cur->hit_tile % nbands;
     long row = (long)cur->hit_strip * R + (long)(hi / ht_per_block) * 64 + hi % ht_per_block;
     long col = (long)wi * 64;
@@ -383,8 +368,8 @@ int main(int argc, char **argv) {
     if (proof_set_threads((size_t)prl_cpu_proof_threads())) {
         fputs("[!] cannot initialize proof thread pool\n", stderr); return 2;
     }
-    printf("[cpu] budget=%d prep/hash=%d proof=%d pow=%d\n", prl_cpu_total(),
-           prl_cpu_prep_threads(), prl_cpu_proof_threads(), prl_cpu_pow_threads());
+    printf("[cpu] budget=%d prep/hash=%d proof=%d\n", prl_cpu_total(),
+           prl_cpu_prep_threads(), prl_cpu_proof_threads());
     pool_conn_init(&user_conn, "");
 
     POOL.init_params(&mp);
@@ -393,7 +378,11 @@ int main(int argc, char **argv) {
     while (do_handshake(host, port, addr, worker, pass)) { puts("[!] handshake failed, retry 10s"); sleep(10); }
 
     long M = mp.m, N = mp.n, Kc = mp.k;
-    int nbands = (int)(N / 64), nstrips = (int)(M / R);
+    if (N <= 0 || N % PRL_BAND_COLS) {
+        fputs("[!] N must be a positive multiple of the 64-column PRL band\n", stderr);
+        return 2;
+    }
+    int nbands = (int)(N / PRL_BAND_COLS), nstrips = (int)(M / R);
     int tile_h = (int)mp.nrows, n_hi = R / tile_h;
     if (pearl_init(dev, nbands)) { puts("pearl_init failed"); return 2; }
 
@@ -420,6 +409,8 @@ int main(int argc, char **argv) {
             fputs("[!] bundle allocation failed\n", stderr); return 2;
         }
     }
+    uint32_t *scratch = malloc(2ull * nbands * 16 * 64 * 4);
+    if (!scratch) { fputs("[!] scratch allocation failed\n", stderr); return 2; }
     submit_addr = addr; submit_worker = worker;
     if (pthread_create(&proof_thread, 0, proof_worker, 0)) {
         fputs("[!] cannot start proof worker\n", stderr); return 2;
@@ -475,16 +466,16 @@ int main(int argc, char **argv) {
 
         time_t t0 = time(0);
         struct timespec sa; clock_gettime(CLOCK_MONOTONIC, &sa);
-        if (pearl_use_b) pearl_use_b(g_reuse_b ? 0 : cur->slot);
-        else pearl_set_b(cur->Btn, (int)N);
+        pearl_use_b(g_reuse_b ? 0 : cur->slot);
         uint32_t tgt[8];
         long rounded_k = Kc;
         job_t jt; jt.difficulty = cur->diff; memcpy(jt.ptarget, cur->ptarget, 32);
         POOL.build_target(&jt, tile_h, rounded_k, tgt);
         struct timespec sbb; clock_gettime(CLOCK_MONOTONIC, &sbb);
         int hs = -1, ht = -1;
-        int rc = scan_full(cur->An, nstrips, cur->roots[2], tgt, nbands, n_hi,
-                           prl_cpu_pow_threads(), &hs, &ht);
+        int pow_n = getenv("PRL_POW_THREADS") ? atoi(getenv("PRL_POW_THREADS")) : 64;
+        int rc = scan_full(cur->An, nstrips, cur->roots[2], tgt, nbands, n_hi, pow_n,
+                           scratch, &hs, &ht);
         struct timespec sb; clock_gettime(CLOCK_MONOTONIC, &sb);
         g_last_scan_ms = (sb.tv_sec - sa.tv_sec) * 1000 + (sb.tv_nsec - sa.tv_nsec) / 1000000;
         if (getenv("PRL_LOOP_PROF"))
@@ -512,7 +503,6 @@ int main(int argc, char **argv) {
     pthread_join(proof_thread, 0);
     proof_clear_b_cache();
     prl_b3_shutdown();
-    pearl_finalize();
     pool_stop_reader(&user_conn);
     return 0;
 }

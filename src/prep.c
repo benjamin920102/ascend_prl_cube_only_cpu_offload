@@ -572,37 +572,31 @@ static void compute_bn(const int8_t *B, const int8_t *EBR, int8_t *out,
     }
 }
 
-#define BN_PACK 64
-// Pack the noised B matrix by 64-column band and rank-sized fold, matching the
-// NPU cube kernel's [band][fold][column][k] access order.
-static void compute_bn_pack(const int8_t *B, const int8_t *EBR, int8_t *bt,
+/* Pack logical B[K,N] as [fold][N/32][128][32] for Cube NZ input. */
+static void compute_bn_nz(const int8_t *B, const int8_t *EBR, int8_t *bt,
                             const uint16_t *f, const uint16_t *s,
                             int64_t k, int64_t n, int nt) {
-    int64_t nbands = n / BN_PACK, NFOLD = k / PRL_RANK;
+    const int64_t blocks = n / PRL_INT8_NZ_C0;
 #pragma omp parallel for schedule(static) num_threads(nt)
-    for (int64_t jp = 0; jp < nbands; jp++) {
-        /* One column at a time reuses its noise row across all folds and
-         * reads its source B column sequentially. The packed offset is unchanged. */
-        for (int64_t col_in_band = 0; col_in_band < BN_PACK; col_in_band++) {
-            int64_t col = jp * BN_PACK + col_in_band;
-            const int8_t *bcol = B + col * k;
-            const int8_t *ecol = EBR + col * PRL_RANK;
+    for (int64_t block = 0; block < blocks; ++block) {
+        int8_t tile[PRL_INT8_NZ_C0][PRL_RANK];
+        for (int64_t row = 0; row < k; row += PRL_RANK) {
+            for (int64_t c = 0; c < PRL_INT8_NZ_C0; ++c) {
+                int64_t col = block * PRL_INT8_NZ_C0 + c;
+                const int8_t *bcol = B + col * k + row;
+                const int8_t *ecol = EBR + col * PRL_RANK;
 #if defined(__aarch64__)
-            noise128_t t = noise128_load(ecol);
-            for (int64_t p = 0; p < NFOLD; ++p) {
-                int64_t row = p * PRL_RANK;
-                int8_t *dst = bt + ((jp * NFOLD + p) * BN_PACK + col_in_band) * PRL_RANK;
-                noise128_apply(t, bcol + row, dst, f + row, s + row, PRL_RANK);
-            }
+                noise128_apply(noise128_load(ecol), bcol, tile[c],
+                               f + row, s + row, PRL_RANK);
 #else
-            for (int64_t p = 0; p < NFOLD; ++p) {
-                int8_t *dst = bt + ((jp * NFOLD + p) * BN_PACK + col_in_band) * PRL_RANK;
-                for (int64_t ki = 0; ki < PRL_RANK; ++ki) {
-                    int64_t row = p * PRL_RANK + ki;
-                    dst[ki] = (int8_t)(bcol[row] + ecol[f[row]] - ecol[s[row]]);
-                }
-            }
+                for (int64_t i = 0; i < PRL_RANK; ++i)
+                    tile[c][i] = (int8_t)(bcol[i] + ecol[f[row + i]] - ecol[s[row + i]]);
 #endif
+            }
+            int8_t *dst = bt + row * n + block * PRL_RANK * PRL_INT8_NZ_C0;
+            for (int64_t i = 0; i < PRL_RANK; ++i)
+                for (int64_t c = 0; c < PRL_INT8_NZ_C0; ++c)
+                    dst[i * PRL_INT8_NZ_C0 + c] = tile[c][i];
         }
     }
 }
@@ -644,7 +638,7 @@ static int prep_from_ab_impl(const int8_t *A, const int8_t *B, const uint8_t *ke
     int rc = prepare_an_stamp(A, seedA, commitA, EAL, A_noised, m, k, nt);
     if (rc) { free(pairs); return rc; }
     if (pack) {
-        compute_bn_pack(B, EBR, Bt_out, fB, sB, k, n, nt);
+        compute_bn_nz(B, EBR, Bt_out, fB, sB, k, n, nt);
     } else {
         compute_bn(B, EBR, Bt_out, fB, sB, k, n, nt);
     }
@@ -750,7 +744,7 @@ static int prep_b_side_impl(uint64_t seed, int8_t *B, const uint8_t *key,
     uint16_t *sB = fB + k;
     perm_pairs(seedB, commitB, k, fB, sB);
 
-    compute_bn_pack(B, EBR, bt_packed, fB, sB, k, n, nt);
+    compute_bn_nz(B, EBR, bt_packed, fB, sB, k, n, nt);
     free(fB);
     return 0;
 }
@@ -826,7 +820,7 @@ int prep_random_reuse(uint64_t seed, int8_t *A, int8_t *B, const uint8_t *key,
                             cert_version >= 3 ? CERT_SALTED : CERT_LEGACY);
 }
 
-int prep_random_bt_reuse(uint64_t seed, int8_t *A, int8_t *B, const uint8_t *key,
+int prep_random_nz_reuse(uint64_t seed, int8_t *A, int8_t *B, const uint8_t *key,
                 int64_t m, int64_t n, int64_t k,
                 int8_t *A_noised, int8_t *bt_packed, int8_t *EAL, int8_t *EBR,
                 uint8_t *rootA, uint8_t *rootB, uint8_t *commitA, uint8_t *commitB,

@@ -5,11 +5,11 @@
 **English** | [中文](README_zh.md)
 
 A from-scratch miner for the [Pearl](https://arxiv.org/abs/2504.09971) Proof-of-**Useful**-Work
-coin targeting Huawei Ascend 910B and 910C NPUs.
+coin on Huawei **Ascend 910B** NPUs. Tested on a 910B4; it does **~10 TH/s/device end-to-end**.
 
 > **DISCLAMER:** for educational purpose only. Use only with hardware you are authorized to.
 
-This source version runs INT8 matrix multiplication on Cube and all Pearl postprocessing on the CPU. Build from source to use this data path.
+Each kernel submission handles one strip. The host retains a two-slot asynchronous pipeline. Vector partial input uses a TQue with two allocated buffers and prefetches the next fold.
 
 ## Quickstart
 
@@ -18,8 +18,38 @@ This source version runs INT8 matrix multiplication on Cube and all Pearl postpr
    `prl1p2skcz8kxn03p3j2hzaz4j687ewan8deju7lgvpswux9hkgavcz5s6v5p83`.
 2. **Choose a pool.** Any standard `stratum` Pearl pool should work. These sources are tested with
    [Kryptex](https://pool.kryptex.com/prl). Note: different pools accept proofs for different M, N, K (see [Performance](#performance-and-shapes)).
-3. **Build and run this source version.** Follow [Build](#build), then run
-   `ASCEND_RT_VISIBLE_DEVICES=0 WALLET=prl1... POOL=pool.host PORT=7000 ./scripts/launch.sh`.
+3. **Run it** — one of:
+   **Option 1 — Docker** (recommended):
+   ```bash
+   docker pull arabel1a/ascend_prl
+   docker run --rm -it --privileged --network host \
+     -v /usr/local/Ascend/driver/lib64:/usr/local/Ascend/driver/lib64 \
+     -v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
+     -v /etc/ascend_install.info:/etc/ascend_install.info \
+     -v /usr/local/dcmi:/usr/local/dcmi \
+     -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
+     -e WALLET=prl1...your_wallet -e POOL=pool.host -e PORT=7000 \
+     -e ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 \
+     arabel1a/ascend_prl:latest
+   ```
+   The image ships the CANN runtime only; the host supplies the NPU driver
+   (`libascend_hal.so`), so the `-v /usr/local/Ascend/driver/...` mounts and `--privileged`
+   are **required** for the miner to reach the NPUs. Set `ASCEND_RT_VISIBLE_DEVICES` to the
+   dies you want. For Chinese users: pull through a
+   [Docker Hub mirror](https://github.com/dongyubin/DockerHub) that proxies user repos, e.g.:
+   ```bash
+   docker pull docker.1panel.live/arabel1a/ascend_prl   # fastest mirror tested for this repo (CN-only)
+   ```
+   
+   **Option 2 — pre-built binary** (Linux/aarch64 + CANN runtime required):
+   ```bash
+   git clone https://github.com/arabel1a/ascend_prl.git && cd ascend_prl
+   ./scripts/get_release.sh                 # or grab them from the Releases page
+   export WALLET=prl1...your_wallet
+   export POOL=pool.host   PORT=7000        # your pool's stratum host/port
+   ASCEND_RT_VISIBLE_DEVICES=0,1,2,3 ./scripts/launch.sh
+   ```
+   **Option 3 — build it yourself.** See [Build](#build).
 
 ## Coexistence with other NPU workloads
 
@@ -54,12 +84,12 @@ Build flags (`make VAR=...`):
 
 ## Performance and shapes
 
-Rank is fixed at 128 and K at 4096. Each strip has 128 A rows. The Cube kernel writes
-32 independent INT32 products per 64-column B band in `[band][fold][B column][A row]`
-order. An asynchronous D2H copy follows the kernel on the same stream. With
-`MDIM=16384`, each strip transfers 256 MiB, and a full no-hit scan transfers 32 GiB.
-`PIPE_DEPTH=4` allocates 1 GiB of pinned host output plus 256 MiB of device output.
-For a smaller pinned footprint, build all components with `make PIPE_DEPTH=2`.
+The cube unit can not perform XORs and shifts, and the vector is bad at multiplying matrices. Thus we need to transfer
+each k-partial from cube to vector through L2 (2TB/s aggregated). This limits TH/s ~ OP/s / 2 = (memory bandwidth) * (fold arithmetic intensity). We transfer 8/r bytes in total -> arithmetic intensity = r/8. So the silicone peak TH/s is rank / 8 TH/s.
+
+Coin specs define other ranks, but this production source fixes `r=128`, `K=4096`, `NINNER=1`, and `NFOLD=32`. There is no rank selection at build time or runtime.
+
+> Note that **Ascend 310** and **950** do not have these limitations and can (theoretically) reach closer to hardware peak TOP/s.
 
 ## GZIP v2 + custom share difficulty (Kryptex)
 
@@ -126,12 +156,12 @@ subsequent proofs reuse its tree. This retains one B tree in memory. Before B re
 proofs drain and the cache is cleared; generation, pointer, key, n, and k identify each entry.
 Non-reuse-B proofs do not cache B. Normal shutdown drains work and releases cache/pool.
 
-`PRL_CPU_THREADS` is capped by process affinity. The initial prep-side budget
-(`PRL_PREP_THREADS`) is shared between matrix preparation and the OpenMP PoW scan.
-`PRL_POW_THREADS` controls the scan share, leaving at least one preparation thread.
-`PRL_PROOF_THREADS` controls the separate proof budget. At most two CPU threads
-in the budget triggers serialization of these compute stages.
-
+`PRL_CPU_THREADS` defaults to the process affinity CPU count and cannot exceed it.
+`PRL_PREP_THREADS` defaults to about three quarters of that budget (at most budget minus one),
+while `PRL_PROOF_THREADS` defaults to the remainder and is capped by it. Prep/OpenMP/BLAKE3
+and proof/private Rayon teams use separate partitions; idle pool and I/O/control threads
+are outside this compute-team budget. On one CPU, prep and proof/encoding serialize.
+`PRL_POW_THREADS` remains unused by the current NPU scan. No new make options are required.
 The launcher sets `OMP_WAIT_POLICY=PASSIVE GOMP_SPINCOUNT=0` before process startup; use
 those environment settings when launching manually too, as some runtimes read them before main.
 
@@ -140,15 +170,31 @@ previous default zero-filled behavior. The rank-128 NEON byte-index path is the 
 production path; the portable fallback also computes rank 128. No dynamic rank or fill-mode
 selection remains.
 
-## CPU transcript and proof of work
+## BLAKE3 Vector64-only production hashing
 
-For each fold, the CPU adds the raw product to a running matrix modulo 2^32.
-It XOR-reduces all 64 B columns and combines A rows in pairs separated by 32
-within each group of 64 rows. The transcript update is
-`rotl32(word, 13) ^ folded`, at word index `fold % 16`.
-Each tile then uses keyed BLAKE3 over 64 little-endian transcript bytes.
-The CPU compares the digest as a little-endian 256-bit integer and returns the
-first hit in the original scan order with tile index `hi * nbands + band`.
+The production Vector consumer **always** performs keyed BLAKE3 compression
+using 64-way memory-based SIMD on the existing `16 x 64` transcript SoA buffer.
+All seven rounds and eight 32-bit output words are computed with Vector APIs.
+There is **no scalar BLAKE3 implementation, scalar hash fallback, diagnostic
+switch, or Vector64 compile-time option** in the production Vector kernel.
+The host rejects `n_hi != 64` rather than silently switching to scalar.
+The supported pool configurations set `nrows=2`, giving `n_hi=128/2=64`.
 
-The previous Cube → Vector GM ring, producer/consumer flags and device key/target
-uploads were removed. Proof construction uses the existing CPU path.
+The existing 256-bit target comparator still reads the eight Vector-produced
+hash words per lane in order to preserve first-hit and proof semantics. These
+scalar target comparisons are **not** scalar BLAKE3 compression.
+
+## 4096-column AB-NZ Cube path
+
+Each fold multiplies logical INT8 A [128,128] by B [128,4096]. Both inputs
+are packed as NZ and the Cube writes an INT32 ND result. The Vector consumer
+reconstructs the original 64-column transcript bands and uses the same
+fold, BLAKE3 and proof indexing. A partial final group is zero-padded and
+only real bands are scanned.
+
+The build uses up to 20 Cube blocks, with one block per group up to that
+limit. At N=16384, four Cube blocks and eight Vector workers are active,
+and the BUFS=4 partial ring uses 1 GiB of device memory. Multiple qualifying
+hits may be selected in a different order because bands are assigned to
+different workers. Rebuild the kernel and miner together using
+`bash scripts/build.sh` in the CANN build environment.

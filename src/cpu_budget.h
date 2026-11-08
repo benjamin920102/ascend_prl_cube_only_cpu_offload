@@ -4,7 +4,6 @@
 int prl_cpu_total(void);
 int prl_cpu_prep_threads(void);
 int prl_cpu_proof_threads(void);
-int prl_cpu_pow_threads(void);
 void prl_cpu_enter(void);
 void prl_cpu_leave(void);
 void prl_b3_shutdown(void);

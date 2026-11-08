@@ -2,7 +2,7 @@
 # Consensus / kernel configuration is fixed: rank=128, K=4096, 32 folds.
 # There is no supported build-time rank or zero-fill mode switch.
 MDIM ?= 16384
-# Pinned host output slots. Each slot holds one strip of raw INT32 partials.
+# Host strip slots (separate from kernel BUFS). Use 2 for an A/B baseline.
 PIPE_DEPTH ?= 4
 
 OUT  := build
@@ -37,7 +37,7 @@ guard: $(OUT)
 kernel: $(OUT)
 	cd kernel && rm -rf build && mkdir build && cd build && \
 	  cmake -DCMAKE_ASC_RUN_MODE=npu -DCMAKE_ASC_ARCHITECTURES=dav-2201 \
-	        -DPEARL_PIPE_DEPTH=$(PIPE_DEPTH) \
+	        -DPEARL_PIPE_DEPTH=$(PIPE_DEPTH) -DBUFS=4 -DVEC2X=2 \
 	        -DCMAKE_MODULE_PATH="$$ASC_MODULES" .. && make -j
 	cp kernel/build/libpearl_hlc2.so $(OUT)/
 

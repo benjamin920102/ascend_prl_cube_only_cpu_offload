@@ -7,7 +7,7 @@
 
 static pthread_once_t once = PTHREAD_ONCE_INIT;
 static pthread_mutex_t serial_mu = PTHREAD_MUTEX_INITIALIZER;
-static int total, prep, proof, pow_threads;
+static int total, prep, proof;
 static int env_count(const char *name, int fallback, int cap) {
     const char *s = getenv(name);
     char *end;
@@ -24,19 +24,14 @@ static void init_budget(void) {
         if (count > 0) available = count;
     }
     total = env_count("PRL_CPU_THREADS", available, available);
-    if (total == 1) { prep = proof = pow_threads = 1; return; }
+    if (total == 1) { prep = proof = 1; return; }
     prep = env_count("PRL_PREP_THREADS", total - (total / 4 ? total / 4 : 1), total - 1);
+    /* One partition for prep/OpenMP/BLAKE3, the other for proof/Rayon. */
     proof = env_count("PRL_PROOF_THREADS", total - prep, total - prep);
-    // Prep and scan overlap. Reserve scan capacity out of the prep-side budget.
-    int scan_cap = prep > 1 ? prep - 1 : 1;
-    int scan_default = scan_cap < total / 4 ? scan_cap : total / 4;
-    pow_threads = env_count("PRL_POW_THREADS", scan_default > 0 ? scan_default : 1, scan_cap);
-    if (prep > 1) prep -= pow_threads;
 }
 int prl_cpu_total(void) { pthread_once(&once, init_budget); return total; }
 int prl_cpu_prep_threads(void) { pthread_once(&once, init_budget); return prep; }
 int prl_cpu_proof_threads(void) { pthread_once(&once, init_budget); return proof; }
-int prl_cpu_pow_threads(void) { pthread_once(&once, init_budget); return pow_threads; }
-/* With at most two CPUs, serialize CPU preparation, PoW and proof+encoding. */
-void prl_cpu_enter(void) { if (prl_cpu_total() <= 2) pthread_mutex_lock(&serial_mu); }
-void prl_cpu_leave(void) { if (prl_cpu_total() <= 2) pthread_mutex_unlock(&serial_mu); }
+/* A one-CPU process serializes CPU preparation and proof+encoding. */
+void prl_cpu_enter(void) { if (prl_cpu_total() == 1) pthread_mutex_lock(&serial_mu); }
+void prl_cpu_leave(void) { if (prl_cpu_total() == 1) pthread_mutex_unlock(&serial_mu); }
