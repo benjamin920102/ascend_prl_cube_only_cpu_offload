@@ -20,8 +20,8 @@
 
 extern int pearl_init(int dev, int nbands);
 extern void pearl_use_b(int slot);
-extern void pearl_set_b_nz_slot(const int8_t *b_nz, int slot);
-extern int prep_random_nz_reuse(uint64_t seed, int8_t *A, int8_t *B, const uint8_t *key,
+extern void pearl_set_bt256_slot(const int8_t *bt, int slot);
+extern int prep_random_bt256_reuse(uint64_t seed, int8_t *A, int8_t *B, const uint8_t *key,
                           int64_t m, int64_t n, int64_t k,
                           int8_t *An, int8_t *bt_packed, int8_t *EAL, int8_t *EBR,
                           uint8_t *rA, uint8_t *rB, uint8_t *cA, uint8_t *cB, int nt, int cert_version);
@@ -155,7 +155,7 @@ static int ensure_bside(long N, long Kc, int prep_n) {
     prl_cpu_enter();
     prep_check(prep_b_side_reuse(seed, bs.B, bs.key, N, Kc, bs.bt, bs.EBR, bs.rootB, bs.commitB, prep_n, cert_version));
     prl_cpu_leave();
-    pearl_set_b_nz_slot(bs.bt, 0);
+    pearl_set_bt256_slot(bs.bt, 0);
     bs.slot = 0; bs.valid = 1; bs.since = 0;
     return 1;
 }
@@ -192,13 +192,13 @@ static void *prep_worker(void *p) {
     clock_gettime(CLOCK_MONOTONIC, &pa);
     uint64_t seed = ((uint64_t)rand() << 32) ^ (uint64_t)time(0);
     int prep_n = prl_cpu_prep_threads();
-    prep_check(prep_random_nz_reuse(seed, b->A, b->B, b->key, mp.m, mp.n, mp.k,
+    prep_check(prep_random_bt256_reuse(seed, b->A, b->B, b->key, mp.m, mp.n, mp.k,
                    b->An, b->Btn, b->EAL, b->EBR,
                    b->roots[0], b->roots[1], b->roots[2], b->roots[3], prep_n, b->cert_version));
     clock_gettime(CLOCK_MONOTONIC, &pb);
     g_last_prep_ms = (pb.tv_sec - pa.tv_sec) * 1000 + (pb.tv_nsec - pa.tv_nsec) / 1000000;
     prl_cpu_leave();
-    pearl_set_b_nz_slot(b->Btn, b->slot);
+    pearl_set_bt256_slot(b->Btn, b->slot);
     return 0;
 }
 

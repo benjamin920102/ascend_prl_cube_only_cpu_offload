@@ -185,16 +185,17 @@ Host 強制要求 `n_hi=64`，不符合時直接報錯，避免悄悄切換回 S
 以維持原本 Hit 判定順序及 Proof 格式。**這部分是 Scalar Target 比較，
 不是 Scalar BLAKE3 Hash。**
 
-## 4096 欄 AB-NZ Cube 路徑
+## 256 欄 BT-view Cube 路徑
 
-每個 fold 將 INT8 A [128,128] 與 B [128,4096] 排成 NZ 後相乘，
-輸出 INT32 ND。Vector 按原本每 64 欄重建 transcript，沿用原有的
-fold、BLAKE3 與 proof 索引。最後一組不足 4096 欄時補零，只掃描實際欄位。
+每個 fold 將打包後的 B [256,128] 乘上原始 A [128,4096] 中該 fold
+的邏輯轉置 view，INT32 輸出依 [B 欄,A 列] 排列。Vector 連續讀取每個
+64 欄 band，最後一次讀完就釋放該 band。Cube 等同一組的有效 band 都釋放後
+才重用 slot。末組不足 256 欄時補零。
 
-N=16384 時由 4 個 Cube block 和 8 個 Vector worker 處理，
-BUFS=4 的 partial ring 使用 1 GiB 裝置記憶體。若同時有多個符合目標的
-hit，重新分配 worker 後，回傳的 hit 可能不同。請在 CANN 編譯環境
-執行 `bash scripts/build.sh`，一併重編 kernel 與 miner。
+N=16384 時，64 組分配給 20 個 Cube block 與 40 個 Vector worker。
+BUFS=4 的 partial ring 使用 320 MiB 裝置記憶體。若同時有多個符合目標的
+hit，重新分配 worker 後回傳順序可能不同。請在 CANN 環境執行
+`bash scripts/build.sh`，一併重編 kernel 與 miner。
 
 ## A 噪聲 BLAKE3 4-way NEON（ARM64）
 

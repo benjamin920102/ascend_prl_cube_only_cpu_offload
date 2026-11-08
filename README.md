@@ -184,17 +184,16 @@ The existing 256-bit target comparator still reads the eight Vector-produced
 hash words per lane in order to preserve first-hit and proof semantics. These
 scalar target comparisons are **not** scalar BLAKE3 compression.
 
-## 4096-column AB-NZ Cube path
+## 256-column BT-view Cube path
 
-Each fold multiplies logical INT8 A [128,128] by B [128,4096]. Both inputs
-are packed as NZ and the Cube writes an INT32 ND result. The Vector consumer
-reconstructs the original 64-column transcript bands and uses the same
-fold, BLAKE3 and proof indexing. A partial final group is zero-padded and
-only real bands are scanned.
+Each of the 32 folds computes packed B [256,128] times a logical transpose
+of the original A [128,4096] fold view. Cube outputs INT32 in [B column,A row]
+order. Vector reads each 64-column band contiguously and releases it after
+its last partial read. Cube reuses the 256-column slot once all real bands
+have been released. The last group is padded with zeros when needed.
 
-The build uses up to 20 Cube blocks, with one block per group up to that
-limit. At N=16384, four Cube blocks and eight Vector workers are active,
-and the BUFS=4 partial ring uses 1 GiB of device memory. Multiple qualifying
-hits may be selected in a different order because bands are assigned to
-different workers. Rebuild the kernel and miner together using
-`bash scripts/build.sh` in the CANN build environment.
+At N=16384, the 64 groups are assigned to 20 Cube blocks and 40 Vector
+workers. BUFS=4 uses 320 MiB for the device partial ring. The transcript and
+proof indexing retain the original 64-column band width. Worker assignment can
+change which qualifying hit is returned when multiple hits exist.
+Rebuild both kernel and miner using `bash scripts/build.sh`.
